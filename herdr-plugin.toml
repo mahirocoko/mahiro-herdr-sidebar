@@ -1,0 +1,39 @@
+id = "mahiro-herdr-sidebar"
+name = "Mahiro Herdr Sidebar"
+version = "0.1.0"
+min_herdr_version = "0.9.0"
+description = "Project Mahiro's normalized usage cache into Herdr agent rows."
+platforms = ["macos", "linux"]
+
+[[startup]]
+command = ["sh", "-c", "exec node \"$HERDR_PLUGIN_ROOT/bin/mahiro-herdr-sidebar.mjs\" startup"]
+
+[[actions]]
+id = "refresh"
+title = "Refresh Mahiro sidebar metadata"
+command = ["sh", "-c", "exec node \"$HERDR_PLUGIN_ROOT/bin/mahiro-herdr-sidebar.mjs\" refresh"]
+
+[[actions]]
+id = "configure"
+title = "Configure Mahiro sidebar rows"
+command = ["sh", "-c", "exec node \"$HERDR_PLUGIN_ROOT/bin/mahiro-herdr-sidebar.mjs\" configure-live"]
+
+[[actions]]
+id = "uninstall"
+title = "Restore Mahiro sidebar configuration"
+command = ["sh", "-c", "exec node \"$HERDR_PLUGIN_ROOT/bin/mahiro-herdr-sidebar.mjs\" restore-live"]
+
+[[events]]
+id = "mahiro-herdr-sidebar-agent-detected"
+on = "pane.agent_detected"
+command = ["sh", "-c", "exec node \"$HERDR_PLUGIN_ROOT/bin/mahiro-herdr-sidebar.mjs\" event"]
+
+[[events]]
+id = "mahiro-herdr-sidebar-agent-status"
+on = "pane.agent_status_changed"
+command = ["sh", "-c", "exec node \"$HERDR_PLUGIN_ROOT/bin/mahiro-herdr-sidebar.mjs\" event"]
+
+[[events]]
+id = "mahiro-herdr-sidebar-pane-focused"
+on = "pane.focused"
+command = ["sh", "-c", "exec node \"$HERDR_PLUGIN_ROOT/bin/mahiro-herdr-sidebar.mjs\" event"]

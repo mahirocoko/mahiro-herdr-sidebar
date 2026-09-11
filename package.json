@@ -1,0 +1,14 @@
+{
+  "name": "mahiro-herdr-sidebar",
+  "version": "0.1.0",
+  "private": true,
+  "license": "UNLICENSED",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test",
+    "check": "node --check bin/mahiro-herdr-sidebar.mjs && node --check src/core.mjs && node --check src/workflows.mjs && node --test"
+  }
+}
