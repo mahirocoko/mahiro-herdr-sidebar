@@ -1,10 +1,12 @@
 import { resolve } from 'node:path'
 
 import {
+  captureConfigState,
   clearOwnedMetadata,
   configure,
   preflightRestoreConfig,
   refresh,
+  restoreCapturedConfigState,
   restoreConfig,
   runHerdr
 } from './core.mjs'
@@ -32,7 +34,81 @@ function pluginEnabled(plugin) {
 }
 
 function findPlugin(output) {
-  return registryPlugins(output).find(plugin => pluginIdentity(plugin) === PLUGIN_ID) || null
+  const matches = registryPlugins(output).filter(plugin => pluginIdentity(plugin) === PLUGIN_ID)
+  if (matches.length > 1) throw new Error('refusing operation: plugin registry has ambiguous duplicate IDs')
+  return matches[0] || null
+}
+
+function requireSameRoot(plugin, absoluteRoot, operation) {
+  const registeredRoot = pluginRoot(plugin)
+  if (typeof registeredRoot !== 'string' || resolve(registeredRoot) !== absoluteRoot) {
+    throw new Error(`refusing ${operation}: plugin ID is linked to a different or ambiguous root`)
+  }
+}
+
+function registeredAtRoot(run, absoluteRoot, operation) {
+  const plugin = findPlugin(run(['plugin', 'list', '--json']))
+  if (!plugin) throw new Error(`refusing ${operation}: plugin registration is missing`)
+  requireSameRoot(plugin, absoluteRoot, operation)
+  return plugin
+}
+
+function setPluginEnabled(run, absoluteRoot, enabled, operation) {
+  const before = registeredAtRoot(run, absoluteRoot, operation)
+  if (pluginEnabled(before) === enabled) return
+  let commandError = null
+  try {
+    run(['plugin', enabled ? 'enable' : 'disable', PLUGIN_ID])
+  } catch (error) {
+    commandError = error
+  }
+  let after
+  try {
+    after = registeredAtRoot(run, absoluteRoot, `${operation} postcondition`)
+  } catch (inspectionError) {
+    throw new Error(`${commandError?.message || `${operation} command returned without the requested state`}; ${inspectionError.message}`)
+  }
+  if (pluginEnabled(after) === enabled) return
+  throw commandError || new Error(`${operation} command did not reach the requested enabled state`)
+}
+
+function unlinkPlugin(run, absoluteRoot, operation) {
+  registeredAtRoot(run, absoluteRoot, operation)
+  let commandError = null
+  try {
+    run(['plugin', 'unlink', PLUGIN_ID])
+  } catch (error) {
+    commandError = error
+  }
+  let after
+  try {
+    after = findPlugin(run(['plugin', 'list', '--json']))
+  } catch (inspectionError) {
+    throw new Error(`${commandError?.message || `${operation} command returned`}; registry postcondition is ambiguous or unavailable: ${inspectionError.message}`)
+  }
+  if (!after) return
+  try {
+    requireSameRoot(after, absoluteRoot, `${operation} postcondition`)
+  } catch (inspectionError) {
+    throw new Error(`${commandError?.message || `${operation} command returned`}; ${inspectionError.message}`)
+  }
+  throw commandError || new Error(`${operation} command did not remove the registration`)
+}
+
+function linkPlugin(run, absoluteRoot, operation) {
+  let commandError = null
+  try {
+    run(['plugin', 'link', absoluteRoot, '--disabled'])
+  } catch (error) {
+    commandError = error
+  }
+  let linked
+  try {
+    linked = registeredAtRoot(run, absoluteRoot, `${operation} postcondition`)
+  } catch (inspectionError) {
+    throw new Error(`${commandError?.message || `${operation} command returned without a registration`}; ${inspectionError.message}`)
+  }
+  if (pluginEnabled(linked)) setPluginEnabled(run, absoluteRoot, false, `${operation} disable postcondition`)
 }
 
 function actionEnvironment(env, directory) {
@@ -43,11 +119,6 @@ function workflowRunner(env, clock, deadline) {
   return args => runHerdr(env, args, { clock, deadline })
 }
 
-async function restoreAndReload(env, run) {
-  await restoreConfig(env)
-  run(['server', 'reload-config'])
-}
-
 export async function installWorkflow(root, env = process.env, options = {}) {
   const clock = options.clock || Date.now
   const deadline = options.deadline ?? clock() + WORKFLOW_DEADLINE_MS
@@ -55,18 +126,11 @@ export async function installWorkflow(root, env = process.env, options = {}) {
   const absoluteRoot = resolve(root)
   const existing = findPlugin(run(['plugin', 'list', '--json']))
   const priorEnabled = existing ? pluginEnabled(existing) : false
-  if (existing) {
-    const registeredRoot = pluginRoot(existing)
-    if (!registeredRoot || resolve(registeredRoot) !== absoluteRoot) {
-      throw new Error('refusing install: plugin ID is linked to a different or ambiguous root')
-    }
-  }
+  if (existing) requireSameRoot(existing, absoluteRoot, 'install')
 
   let linkedNew = false
-  let configured = false
-  if (existing && priorEnabled) run(['plugin', 'disable', PLUGIN_ID])
   if (!existing) {
-    run(['plugin', 'link', absoluteRoot, '--disabled'])
+    linkPlugin(run, absoluteRoot, 'install link')
     linkedNew = true
   }
   let directory
@@ -74,35 +138,39 @@ export async function installWorkflow(root, env = process.env, options = {}) {
     directory = run(['plugin', 'config-dir', PLUGIN_ID]).trim()
     if (!directory) throw new Error('Herdr returned an empty plugin config directory')
   } catch (error) {
-    if (linkedNew) run(['plugin', 'unlink', PLUGIN_ID])
-    else if (priorEnabled) run(['plugin', 'enable', PLUGIN_ID])
+    if (linkedNew) unlinkPlugin(run, absoluteRoot, 'install cleanup unlink')
     throw error
   }
   const pluginEnv = actionEnvironment(env, directory)
+  let captured
+  try {
+    captured = await captureConfigState(pluginEnv)
+  } catch (error) {
+    if (linkedNew) unlinkPlugin(run, absoluteRoot, 'install cleanup unlink')
+    throw error
+  }
 
   try {
-    configured = true
+    if (existing) setPluginEnabled(run, absoluteRoot, false, 'install disable')
     await configure(pluginEnv)
     run(['server', 'reload-config'])
-    run(['plugin', 'enable', PLUGIN_ID])
+    setPluginEnabled(run, absoluteRoot, true, 'install enable')
   } catch (error) {
+    try {
+      registeredAtRoot(run, absoluteRoot, 'install rollback')
+    } catch (inspectionError) {
+      throw new Error(`${error.message}; install recovery refused before mutation: ${inspectionError.message}`)
+    }
     let rollbackError = null
-    if (configured) {
-      try {
-        await restoreAndReload(pluginEnv, run)
-      } catch (failure) {
-        rollbackError = failure
-      }
+    try {
+      await restoreCapturedConfigState(captured, pluginEnv)
+      run(['server', 'reload-config'])
+      if (linkedNew) unlinkPlugin(run, absoluteRoot, 'install rollback unlink')
+      else setPluginEnabled(run, absoluteRoot, priorEnabled, 'install rollback enabled state')
+    } catch (failure) {
+      rollbackError = failure
     }
-    if (!rollbackError) {
-      try {
-        if (linkedNew) run(['plugin', 'unlink', PLUGIN_ID])
-        else if (priorEnabled) run(['plugin', 'enable', PLUGIN_ID])
-      } catch (failure) {
-        rollbackError = failure
-      }
-    }
-    if (rollbackError) throw new Error(`${error.message}; rollback retained disabled plugin evidence: ${rollbackError.message}`)
+    if (rollbackError) throw new Error(`${error.message}; install rollback failed with recovery evidence retained: ${rollbackError.message}`)
     throw error
   }
 
@@ -121,12 +189,17 @@ export async function configureLive(env = process.env, options = {}) {
   const clock = options.clock || Date.now
   const deadline = options.deadline ?? clock() + WORKFLOW_DEADLINE_MS
   const run = workflowRunner(env, clock, deadline)
-  await configure(env)
+  const captured = await captureConfigState(env)
   try {
+    await configure(env)
     run(['server', 'reload-config'])
   } catch (error) {
-    await restoreConfig(env)
-    run(['server', 'reload-config'])
+    try {
+      await restoreCapturedConfigState(captured, env)
+      run(['server', 'reload-config'])
+    } catch (rollbackError) {
+      throw new Error(`${error.message}; configure action rollback failed: ${rollbackError.message}`)
+    }
     throw error
   }
   try {
@@ -142,18 +215,17 @@ export async function restoreLive(env = process.env, options = {}) {
   const deadline = options.deadline ?? clock() + WORKFLOW_DEADLINE_MS
   const run = workflowRunner(env, clock, deadline)
   await preflightRestoreConfig(env)
+  const captured = await captureConfigState(env)
   let restored = false
   try {
     restored = await restoreConfig(env)
     run(['server', 'reload-config'])
   } catch (error) {
-    if (restored) {
-      try {
-        await configure(env)
-        run(['server', 'reload-config'])
-      } catch (rollbackError) {
-        throw new Error(`${error.message}; restore action rollback failed: ${rollbackError.message}`)
-      }
+    try {
+      await restoreCapturedConfigState(captured, env)
+      run(['server', 'reload-config'])
+    } catch (rollbackError) {
+      throw new Error(`${error.message}; restore action rollback failed: ${rollbackError.message}`)
     }
     throw error
   }
@@ -165,47 +237,47 @@ export async function restoreLive(env = process.env, options = {}) {
   return { restored }
 }
 
-export async function uninstallWorkflow(env = process.env, options = {}) {
+export async function uninstallWorkflow(root, env = process.env, options = {}) {
   const clock = options.clock || Date.now
   const deadline = options.deadline ?? clock() + WORKFLOW_DEADLINE_MS
   const run = workflowRunner(env, clock, deadline)
+  const absoluteRoot = resolve(root)
   const existing = findPlugin(run(['plugin', 'list', '--json']))
   if (!existing) return { uninstalled: false }
+  requireSameRoot(existing, absoluteRoot, 'uninstall')
   const priorEnabled = pluginEnabled(existing)
   const directory = run(['plugin', 'config-dir', PLUGIN_ID]).trim()
   if (!directory) throw new Error('Herdr returned an empty plugin config directory')
   const pluginEnv = actionEnvironment(env, directory)
   await preflightRestoreConfig(pluginEnv)
-  if (priorEnabled) run(['plugin', 'disable', PLUGIN_ID])
+  const captured = await captureConfigState(pluginEnv)
 
-  let restored = false
-  let safelyRestored = false
   try {
+    setPluginEnabled(run, absoluteRoot, false, 'uninstall disable')
     await restoreConfig(pluginEnv)
-    restored = true
     run(['server', 'reload-config'])
-    safelyRestored = true
     try {
       await clearOwnedMetadata(pluginEnv, { clock, deadline, sequence: options.sequence })
     } catch {
       // TTL remains the fallback when a live pane cannot be cleared.
     }
-    run(['plugin', 'unlink', PLUGIN_ID])
+    unlinkPlugin(run, absoluteRoot, 'uninstall unlink')
     return { uninstalled: true }
   } catch (error) {
-    if (!safelyRestored) {
-      let rollbackError = null
-      try {
-        if (restored) {
-          await configure(pluginEnv)
-          run(['server', 'reload-config'])
-        }
-        if (priorEnabled) run(['plugin', 'enable', PLUGIN_ID])
-      } catch (failure) {
-        rollbackError = failure
-      }
-      if (rollbackError) throw new Error(`${error.message}; uninstall rollback failed: ${rollbackError.message}`)
+    try {
+      registeredAtRoot(run, absoluteRoot, 'uninstall rollback')
+    } catch (inspectionError) {
+      throw new Error(`${error.message}; uninstall recovery refused before mutation: ${inspectionError.message}`)
     }
+    let rollbackError = null
+    try {
+      await restoreCapturedConfigState(captured, pluginEnv)
+      run(['server', 'reload-config'])
+      setPluginEnabled(run, absoluteRoot, priorEnabled, 'uninstall rollback enabled state')
+    } catch (failure) {
+      rollbackError = failure
+    }
+    if (rollbackError) throw new Error(`${error.message}; uninstall rollback failed with recovery evidence retained: ${rollbackError.message}`)
     throw error
   }
 }

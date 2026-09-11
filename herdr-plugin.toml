@@ -1,8 +1,8 @@
 id = "mahiro-herdr-sidebar"
 name = "Mahiro Herdr Sidebar"
-version = "0.1.0"
+version = "0.2.0"
 min_herdr_version = "0.9.0"
-description = "Project Mahiro's normalized usage cache into Herdr agent rows."
+description = "Project normalized external usage caches into Herdr agent rows."
 platforms = ["macos", "linux"]
 
 [[startup]]

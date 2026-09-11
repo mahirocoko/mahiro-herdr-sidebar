@@ -1,7 +1,7 @@
 import { constants } from 'node:fs'
 import { chmod, lstat, mkdir, open, readFile, readdir, rename, rm, rmdir, unlink, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { dirname, join, resolve as resolvePath } from 'node:path'
+import { dirname, isAbsolute, join, resolve as resolvePath } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 
@@ -68,6 +68,17 @@ function pluginConfigDir(env = process.env) {
 
 function herdrConfigPath(env = process.env) {
   return resolvePath(env.HERDR_CONFIG_PATH || join(env.HOME || homedir(), '.config', 'herdr', 'config.toml'))
+}
+
+export function usageCacheDir(env = process.env) {
+  const override = env.MAHIRO_HERDR_USAGE_CACHE_DIR
+  if (override !== undefined) {
+    if (typeof override !== 'string' || override.length === 0 || !isAbsolute(override) || override.includes('\0')) {
+      throw new Error('MAHIRO_HERDR_USAGE_CACHE_DIR must be a non-empty absolute path')
+    }
+    return resolvePath(override)
+  }
+  return resolvePath(env.HOME || homedir(), '.letta', 'mods', 'mahiro-usage')
 }
 
 async function atomicWrite(path, bytes, mode = 0o600) {
@@ -344,6 +355,64 @@ export async function restoreConfig(env = process.env) {
   })
 }
 
+export async function captureConfigState(env = process.env) {
+  return withConfigLock(env, async () => {
+    const path = herdrConfigPath(env)
+    const statePath = join(pluginConfigDir(env), 'config-snapshots.json')
+    const config = await inspectConfig(path)
+    const snapshot = await readOptional(statePath)
+    if (snapshot) {
+      const saved = parseSnapshot(snapshot, path)
+      if (!matchesState(config, true, saved.originalMode, saved.applied) && !matchesState(config, saved.originalExists, saved.originalMode, saved.original)) {
+        throw new Error('cannot capture configuration transaction: config drifted from recovery evidence')
+      }
+    }
+    return { path, statePath, config, snapshot }
+  })
+}
+
+export async function restoreCapturedConfigState(captured, env = process.env) {
+  return withConfigLock(env, async () => {
+    const path = herdrConfigPath(env)
+    const statePath = join(pluginConfigDir(env), 'config-snapshots.json')
+    if (!captured || captured.path !== path || captured.statePath !== statePath) {
+      throw new Error('cannot roll back path-mismatched configuration transaction')
+    }
+    const current = await inspectConfig(path)
+    const currentSnapshot = await readOptional(statePath)
+    if (captured.snapshot) {
+      const saved = parseSnapshot(captured.snapshot, path)
+      const snapshotUnchanged = currentSnapshot?.equals(captured.snapshot) === true
+      const safelyRestored = !currentSnapshot && matchesState(current, saved.originalExists, saved.originalMode, saved.original)
+      if (!snapshotUnchanged && !safelyRestored) throw new Error('cannot roll back configuration transaction: recovery evidence drifted')
+      if (snapshotUnchanged && !matchesState(current, true, saved.originalMode, saved.applied) && !matchesState(current, saved.originalExists, saved.originalMode, saved.original)) {
+        throw new Error('cannot roll back configuration transaction: config drifted')
+      }
+    } else if (currentSnapshot) {
+      const saved = parseSnapshot(currentSnapshot, path)
+      if (!matchesState(saved.originalExists ? { exists: true, mode: saved.originalMode, bytes: saved.original } : { exists: false, mode: saved.originalMode, bytes: saved.original }, captured.config.exists, captured.config.mode, captured.config.bytes)) {
+        throw new Error('cannot roll back configuration transaction: snapshot does not descend from captured state')
+      }
+      if (!matchesState(current, true, saved.originalMode, saved.applied) && !matchesState(current, saved.originalExists, saved.originalMode, saved.original)) {
+        throw new Error('cannot roll back configuration transaction: config drifted')
+      }
+    } else if (!matchesState(current, captured.config.exists, captured.config.mode, captured.config.bytes)) {
+      throw new Error('cannot roll back configuration transaction without recovery evidence')
+    }
+
+    if (captured.snapshot) await atomicWrite(statePath, captured.snapshot)
+    if (captured.config.exists) await atomicWrite(path, captured.config.bytes, captured.config.mode)
+    else await rm(path, { force: true })
+    if (!captured.snapshot) await rm(statePath, { force: true })
+
+    const restored = await inspectConfig(path)
+    const restoredSnapshot = await readOptional(statePath)
+    if (!matchesState(restored, captured.config.exists, captured.config.mode, captured.config.bytes) || (captured.snapshot ? !restoredSnapshot?.equals(captured.snapshot) : restoredSnapshot !== null)) {
+      throw new Error('configuration transaction rollback postcondition failed')
+    }
+  })
+}
+
 export function sanitizeToken(value) {
   const clean = String(value)
     .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/gu, ' ')
@@ -363,6 +432,7 @@ export async function readUsageCache(path, clock = Date.now) {
     const observedAt = clock()
     if (bytesRead > MAX_CACHE_BYTES) return null
     const parsed = JSON.parse(buffer.subarray(0, bytesRead).toString('utf8'))
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null
     if (!Number.isFinite(parsed.fetched) || parsed.fetched < MIN_TIMESTAMP || parsed.fetched > observedAt) return null
     const freshUntil = parsed.fetched + FRESH_MS - FRESHNESS_MARGIN_MS
     if (observedAt >= freshUntil || parsed.failed === true || !Array.isArray(parsed.windows)) return null
@@ -370,7 +440,9 @@ export async function readUsageCache(path, clock = Date.now) {
       if (!window || typeof window.label !== 'string') return []
       if (!Number.isFinite(window.remaining) || window.remaining < 0 || window.remaining > 100) return []
       if (!Number.isFinite(window.reset) || window.reset < MIN_TIMESTAMP || window.reset > observedAt + MAX_RESET_AHEAD_MS) return []
-      return [{ label: sanitizeToken(window.label), remaining: window.remaining, reset: window.reset }]
+      const label = sanitizeToken(window.label)
+      if (label !== window.label) return []
+      return [{ label, remaining: window.remaining, reset: window.reset }]
     })
     return { fetched: parsed.fetched, freshUntil, windows }
   } catch (error) {
@@ -434,7 +506,7 @@ export function agyMetadata(cache, now = Date.now()) {
 export function codexMetadata(cache, now = Date.now()) {
   if (!cache) return { tokens: {}, expiresAt: 0 }
   const fiveHour = usableWindow(cache, item => item.label === 'P:5h', now)
-  const sevenDay = usableWindow(cache, item => item.label === 'P:7d' || item.label === 'S:7d', now)
+  const sevenDay = usableWindow(cache, item => item.label === 'P:7d', now) || usableWindow(cache, item => item.label === 'S:7d', now)
   const primary = fiveHour && { remaining: fiveHour.remaining, text: `Codex 5h ${percent(fiveHour.remaining)}` }
   const secondary = sevenDay && { remaining: sevenDay.remaining, text: `Codex 7d ${percent(sevenDay.remaining)}` }
   const displayed = [fiveHour, sevenDay].filter(Boolean)
@@ -573,7 +645,7 @@ async function reconcile(env, options = {}) {
     : dedupeAgents(agents)
   if (targets.length === 0) return { reports: 0, sequence }
 
-  const cacheRoot = join(env.HOME || homedir(), '.letta', 'mods', 'mahiro-usage')
+  const cacheRoot = usageCacheDir(env)
   const needsAgy = !options.clearOnly && targets.some(liveAgy)
   const needsCodex = !options.clearOnly && targets.some(agent => agent.agent === 'letta' && agent.tokens?.mahiro_sidebar_provider === 'openai-codex')
   const caches = {

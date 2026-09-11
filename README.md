@@ -1,48 +1,109 @@
 # Mahiro Herdr Sidebar
 
-Private, unlicensed Herdr 0.9.0+ plugin that projects Mahiro's existing normalized usage cache into the Agent sidebar. It uses Node 22+ built-ins and has no package dependencies.
+MIT-licensed open adapter that projects normalized external usage snapshots into Herdr's Agent sidebar. It uses Node.js built-ins only, has no package dependencies, and does not collect provider data.
 
-## Current Reality
+The package remains `private: true` to prevent accidental npm publication. Distribution uses Herdr's GitHub plugin installer or a local Git clone; this project is not distributed through npm.
 
-Startup and manual refresh are stateless one-shot reconciliations. They read the agent inventory once, reject inventories above 128 deduplicated panes, and send one complete owned-token patch to every selected pane. Repeated refreshes intentionally republish. Plugin events accept only Herdr's exact `pane_focused`, `pane_agent_detected`, and `pane_agent_status_changed` event payloads and reconcile only the explicit inventory-backed pane. Invalid events make no Herdr calls.
+## Prerequisites and support boundary
 
-Each invocation captures one system-monotonic sequence before inventory and uses it for every report. This gives Herdr an observation order across overlapping local processes. Live Herdr 0.9.0 verification confirmed that lower and equal sequences are silently ignored and that metadata TTL expires from accepted publication time.
+- [Herdr](https://herdr.dev) 0.9.0 or newer
+- Node.js 22 or newer
+- macOS or Linux
+- An external cache producer that implements the open adapter protocol
+- For Codex rows, an external pane-token producer that identifies eligible panes
 
-The configured rows retain Herdr's native state/location row and agent row, then add Mahiro Mods' model and context tokens, an explicit Agy shared-pool label, two family-grouped severity-colored quota rows, and the existing summary token. Every owned token is either set or cleared exactly once per patch. The plugin never clears Mahiro Mods' model, context, or provider tokens.
-
-## Data and provenance limits
-
-The only usage inputs are `~/.letta/mods/mahiro-usage/codex.json` and `~/.letta/mods/mahiro-usage/agy.json`. Only families needed by selected panes are read. Files are opened nonblocking without following symlinks and read once with a strict 64 KiB-plus-one bound. Cache freshness is validated against time observed after the bytes are read.
-
-Quota windows that are expired or inside delivery/reset headroom are omitted. Metadata TTL is recomputed immediately before each report and cannot outlive cache freshness or the earliest displayed reset. Exhausted TTL produces an all-clear patch rather than a nominal 1 ms publication. Values are sanitized and length-bounded.
-
-Agy values are labeled `Agy shared pools`. Gemini and Claude-GPT 5h/7d values are account-level shared pools, not active-session attribution. Codex quota is published to a Letta pane only when inventory explicitly reports `mahiro_sidebar_provider=openai-codex`; only exact account labels `P:5h`, `P:7d`, and `S:7d` are eligible, never model-prefixed labels.
-
-The design was informed by `levi-qiao/herdr-agent-quota` at reviewed commit `0540feb1d51bb7618f94f02aa804493614b1ba0d`; no claim is made that its source was copied.
-
-## Resource model
-
-An invocation is a short-lived Node process with a 30-second deadline. Each Herdr subprocess is limited to five seconds and 256 KiB of output. A full invocation performs at most one inventory call plus one report per deduplicated target. An event performs at most one inventory call and one report. There is no retry, watcher, poller, daemon, pane-content read, transcript/session read, credential read, notification, sorting, network request, or settings UI.
-
-## Configuration ownership
-
-Configuration snapshots bind the exact absolute config path and preserve original bytes, existence, regular-file/non-symlink status, and mode. Configure and restore recognize interrupted states when the current config equals either known snapshot, while retaining recovery evidence until success. Any drift, path mismatch, equivalent or descendant agent-sidebar table, escaped table key, or ambiguous ownership form fails closed.
-
-Config transactions use a lock directory with a PID and nonce owner record. A lock is reclaimed only when the operating system proves the PID no longer exists. Live, permission-denied, malformed, ownerless, reused, or otherwise ambiguous ownership fails closed. Release removes only the matching owner record and then attempts a non-recursive directory removal.
+The source and isolated test suite support macOS and Linux. Mahiro has verified installation, configuration, events, refresh, and metadata behavior with Herdr 0.9.0 on macOS. GitHub Actions runs isolated Node 22 tests on `macos-latest` and `ubuntu-latest`; that Linux check does not claim live Herdr runtime integration.
 
 ## Install
 
-Run `./install.sh`. The Node workflow inspects the JSON plugin registry, refuses the same ID at another root, links new installs disabled, configures and reloads, then enables hooks. Failures roll configuration back before unlinking; failed rollback retains the disabled plugin and evidence. Initial metadata publication is post-commit, so its failure reports a warning without pretending the install rolled back.
+For a released public version:
 
-## Uninstall
+```sh
+herdr plugin install mahirocoko/mahiro-herdr-sidebar --ref v0.2.0
+herdr plugin action invoke configure --plugin mahiro-herdr-sidebar
+```
 
-Run `./uninstall.sh`. The Node workflow preflights restoration, disables hooks, restores and reloads configuration, best-effort clears owned metadata, then unlinks only this plugin. An abort before safe unlink restores the prior enabled state and reapplies configuration when necessary.
+To remove that installation, use Herdr's owning uninstall flow. Its manifest action restores the saved sidebar configuration before Herdr removes the plugin:
+
+```sh
+herdr plugin uninstall mahiro-herdr-sidebar
+```
+
+For local development or an unreleased checkout:
+
+```sh
+git clone https://github.com/mahirocoko/mahiro-herdr-sidebar.git
+cd mahiro-herdr-sidebar
+npm run check
+./install.sh
+```
+
+The installer checks the JSON plugin registry, refuses the same plugin ID at another or ambiguous root, links a new checkout disabled, configures and reloads Herdr, then enables the plugin. Re-running it from the registered checkout is supported. Reinstall failure restores the exact captured pre-operation config and enabled state when ownership evidence remains safe.
+
+The plugin's Herdr uninstall action is intentionally restore-only because a running plugin must not unlink itself. To fully uninstall a locally linked development checkout, run:
+
+```sh
+./uninstall.sh
+```
+
+The uninstall script passes its invoking checkout root to the workflow. Before disabling or changing configuration, the workflow verifies that Herdr's single same-ID registration resolves exactly to that root. This prevents an old clone from uninstalling a newer registration.
+
+## Open adapter inputs
+
+By default, the adapter reads:
+
+- `~/.letta/mods/mahiro-usage/codex.json`
+- `~/.letta/mods/mahiro-usage/agy.json`
+
+The default preserves compatibility with [Mahiro Mods v0.9.4+](https://github.com/mahirocoko/mods/releases/tag/v0.9.4), the reference producer for model/context/provider metadata and normalized Codex/Agy caches. To use another producer, set `MAHIRO_HERDR_USAGE_CACHE_DIR` to a non-empty absolute directory path in the environment that launches the Herdr server; plugin actions and events inherit it. Relative or empty overrides fail closed.
+
+The external producer owns cache collection and normalization. The adapter only reads bounded normalized JSON and never reads credentials or raw provider payloads. Codex publication additionally requires the pane inventory token `mahiro_sidebar_provider=openai-codex`; that token must be produced and owned externally. Agy values are labeled `Agy shared pools` because they are account-level shared pools, not active-session attribution.
+
+See [Open adapter integration protocol](docs/integration.md) for the exact JSON schema, milliseconds/percentage units, accepted labels, freshness and reset margins, pane-token contract, and fail-closed rules.
+
+## Runtime behavior
+
+Startup and manual refresh are stateless one-shot reconciliations. They read the agent inventory once, reject inventories above 128 deduplicated panes, and send one complete owned-token patch to every selected pane. Repeated refreshes intentionally republish. Exact Herdr events reconcile only their explicit inventory-backed pane; invalid events make no Herdr calls.
+
+Each invocation captures one system-monotonic sequence before inventory and uses it for every report. Mahiro's live Herdr 0.9.0 macOS verification confirmed that lower and equal sequences are silently ignored and metadata TTL expires from accepted publication time.
+
+The configured rows retain Herdr's native state/location and agent rows, then add externally owned model and context tokens, an explicit Agy shared-pool label, two family-grouped severity-colored quota rows, and Herdr's summary token. Every adapter-owned token is set or cleared exactly once per patch. The adapter never clears `mahiro_sidebar_model`, `mahiro_sidebar_context`, or `mahiro_sidebar_provider`.
+
+An invocation is a short-lived Node process with a 30-second deadline. Each Herdr subprocess is limited to five seconds and 256 KiB of output. There is no retry, watcher, poller, daemon, pane-content read, transcript/session read, credential read, notification, sorting, network request, or settings UI.
+
+## Configuration safety and recovery
+
+Configuration snapshots bind the exact absolute config path and preserve original bytes, existence, regular-file/non-symlink status, and mode. Configure and restore accept only known original/applied states. Drift, path mismatch, equivalent or descendant agent-sidebar tables, escaped keys, and ambiguous ownership fail closed.
+
+Config changes are serialized by PID-plus-nonce lock directories. A lock is reclaimed only after an operating-system `ESRCH` liveness proof; malformed, ownerless, live, permission-denied, reused, or otherwise ambiguous ownership is never forced.
+
+If uninstall's unlink command reports failure, the workflow reads the registry again:
+
+- If the same-ID entry is absent, uninstall succeeded and returns success.
+- If the same-ID entry still resolves to the invoking root, the workflow restores the exact captured config and enabled state where safe, then reports the unlink failure.
+- If registration is another-root or ambiguous, it performs no recovery mutation and fails with evidence preserved.
+
+On a failed install or uninstall, read the complete error before retrying. Do not delete the plugin config directory or snapshot evidence. Resolve registry-root conflicts by running the script from the checkout shown by `herdr plugin list --json`. Resolve config drift manually before retrying; the adapter will not overwrite an unknown sidebar owner. A metadata-clear failure is non-destructive because Herdr TTL remains the fallback.
+
+## Privacy and security model
+
+The trust boundary is local and narrow: Herdr inventory, two normalized cache files, plugin-owned recovery evidence, and Herdr's CLI. Cache files are opened nonblocking without following final-component symlinks and are bounded to 64 KiB. Values and identifiers are validated and output is sanitized and bounded. No secrets are required by CI or by this adapter.
+
+Producers are outside this repository's trust and lifecycle boundary. Keep cache directories user-readable only, publish snapshots atomically, and never place credentials or raw provider responses in the normalized files.
 
 ## Development
 
-- `npm test` runs isolated tests with temporary HOME/cache/config and a stub Herdr executable.
-- `npm run check` syntax-checks all executable modules and runs the tests.
+```sh
+npm test
+npm run check
+bash -n install.sh uninstall.sh
+git diff --check
+```
+
+Tests isolate HOME, cache, Herdr configuration, and a stub Herdr executable. They do not mutate a live Herdr installation.
 
 ## Non-goals
 
-This repository does not collect provider data, inspect panes, attribute shared Agy quota to a session, manage Mahiro Mods, migrate preview configuration, install upstream plugins, expose settings, emit alerts, reorder agents, or perform live installation and visual acceptance as part of source development.
+This repository does not collect provider data, inspect panes, attribute shared Agy quota to a session, manage Mahiro Mods, add collectors, manage credentials, install upstream plugins, expose settings, emit alerts, reorder agents, or perform live installation and visual acceptance as part of source development.
+
+The design was informed by `levi-qiao/herdr-agent-quota` at reviewed commit `0540feb1d51bb7618f94f02aa804493614b1ba0d`; no claim is made that its source was copied.

@@ -1,8 +1,16 @@
 {
   "name": "mahiro-herdr-sidebar",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "license": "UNLICENSED",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mahirocoko/mahiro-herdr-sidebar.git"
+  },
+  "homepage": "https://github.com/mahirocoko/mahiro-herdr-sidebar#readme",
+  "bugs": {
+    "url": "https://github.com/mahirocoko/mahiro-herdr-sidebar/issues"
+  },
   "type": "module",
   "engines": {
     "node": ">=22"

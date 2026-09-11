@@ -1,11 +1,11 @@
 # Repository contract
 
-This is a private, dependency-free Herdr plugin for Mahiro's local workflow.
+This is an MIT-licensed, dependency-free open adapter that projects normalized external usage data into Herdr.
 
 - Use Node 22+ built-ins only and keep modules small.
 - Use single quotes and omit semicolons in JavaScript.
 - Never read pane contents, transcripts, sessions, credentials, or raw provider payloads.
-- The only usage inputs are normalized `codex.json` and `agy.json` cache files under `~/.letta/mods/mahiro-usage`.
+- The only usage inputs are normalized `codex.json` and `agy.json` cache files under the absolute `MAHIRO_HERDR_USAGE_CACHE_DIR` override or the default `~/.letta/mods/mahiro-usage`.
 - Never clear `mahiro_sidebar_model`, `mahiro_sidebar_context`, or `mahiro_sidebar_provider`; Mahiro Mods owns them.
 - Refresh is stateless: one inventory observation, complete per-pane owned-token patches, no refresh state, suppression, heartbeat, or refresh lock.
 - Keep configuration changes exact, reversible, atomic, serialized by PID-plus-nonce lock directories, and fail closed on ownership ambiguity, lock contention, or drift.

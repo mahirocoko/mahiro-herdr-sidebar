@@ -20,10 +20,10 @@ try {
     await restoreLive()
   } else if (command === 'install' && process.argv[3]) {
     await installWorkflow(process.argv[3])
-  } else if (command === 'uninstall-live' || command === 'uninstall') {
-    await uninstallWorkflow()
+  } else if ((command === 'uninstall-live' || command === 'uninstall') && process.argv[3]) {
+    await uninstallWorkflow(process.argv[3])
   } else {
-    throw new Error('usage: mahiro-herdr-sidebar.mjs <startup|refresh|event|configure|restore|configure-live|restore-live|install ROOT|uninstall-live>')
+    throw new Error('usage: mahiro-herdr-sidebar.mjs <startup|refresh|event|configure|restore|configure-live|restore-live|install ROOT|uninstall-live ROOT>')
   }
 } catch (error) {
   console.error(`mahiro-herdr-sidebar: ${error.message}`)
