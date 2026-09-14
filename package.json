@@ -1,6 +1,6 @@
 {
   "name": "mahiro-herdr-sidebar",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "license": "MIT",
   "repository": {
@@ -17,6 +17,6 @@
   },
   "scripts": {
     "test": "node --test",
-    "check": "node --check bin/mahiro-herdr-sidebar.mjs && node --check src/core.mjs && node --check src/workflows.mjs && node --test"
+    "check": "node --check bin/mahiro-herdr-sidebar.mjs && node --check src/core.mjs && node --check src/workflows.mjs && node --check src/agy-statusline-producer.mjs && node --test"
   }
 }
